@@ -1,5 +1,47 @@
 import { useState, useEffect, useRef } from "react";
 
+// Inject steal animation keyframes once
+const styleEl = document.createElement("style");
+styleEl.textContent = `
+  @keyframes shake {
+    0%  { transform: translateX(0); }
+    15% { transform: translateX(-5px) rotate(-3deg); }
+    30% { transform: translateX(5px)  rotate(3deg); }
+    45% { transform: translateX(-5px) rotate(-2deg); }
+    60% { transform: translateX(4px)  rotate(2deg); }
+    75% { transform: translateX(-3px); }
+    100%{ transform: translateX(0); }
+  }
+  @keyframes flashRed {
+    0%,100% { box-shadow: none; }
+    25%      { box-shadow: 0 0 0 3px #e74c3c, 0 0 16px rgba(231,76,60,0.7); }
+    75%      { box-shadow: 0 0 0 3px #e74c3c, 0 0 16px rgba(231,76,60,0.7); }
+  }
+  @keyframes arrowSlide {
+    0%   { opacity:0; transform: translateX(-12px); }
+    20%  { opacity:1; transform: translateX(0); }
+    80%  { opacity:1; transform: translateX(0); }
+    100% { opacity:0; transform: translateX(12px); }
+  }
+  @keyframes popIn {
+    0%   { opacity:0; transform: scale(0.5); }
+    60%  { opacity:1; transform: scale(1.12); }
+    100% { opacity:1; transform: scale(1); }
+  }
+  @keyframes fadeOut {
+    0%   { opacity:1; transform: scale(1); }
+    100% { opacity:0; transform: scale(0.6); }
+  }
+  .steal-shake  { animation: shake 0.5s ease, flashRed 0.5s ease; }
+  .steal-fadeout{ animation: fadeOut 0.3s ease forwards; }
+  .steal-popin  { animation: popIn 0.35s ease forwards; }
+  .steal-arrow  { animation: arrowSlide 1.2s ease forwards; }
+`;
+if (!document.head.querySelector("#steal-styles")) {
+  styleEl.id = "steal-styles";
+  document.head.appendChild(styleEl);
+}
+
 const SUITS = ["♠","♥","♣","♦"];
 const RANKS = ["A","2","3","4","5","6","7","8","9","10","J","Q","K"];
 const RANK_VALUES = {2:2,3:3,4:4,5:5,6:6,7:7,8:8,9:9,10:10};
@@ -82,6 +124,17 @@ function nextPlayerWithCards(players, from) {
 
 function isGameOver(players) {
   return players.every(p=>p.hand.length===0);
+}
+
+// Peek at what the AI would steal (without mutating state), returns {victimId,rank,cards} or null
+function aiPeekSteal(st) {
+  const ai=st.players[st.currentPlayer];
+  const steals=findStealTargets(st.players,ai.id);
+  for(const card of ai.hand){
+    const t=steals.find(x=>x.rank===card.rank);
+    if(t) return {victimId:t.playerId,rank:t.rank,cards:t.cards};
+  }
+  return null;
 }
 
 function initGame(np) {
@@ -246,6 +299,105 @@ function RankStack({rank,cards,handCount,isMyTurn,onOpenBank,isBanking}) {
   );
 }
 
+// ── Steal animation overlay ──────────────────────────────────────────────────
+// Shows above everything during the steal sequence:
+//   Phase "shake"   → stolen cards shake+flash in source strip (500ms)
+//   Phase "arrow"   → arrow label slides between players (900ms)
+//   Phase "popin"   → cards pop into destination (350ms)
+// After all phases, onDone() is called to commit the real state update.
+function StealAnimation({anim, onDone}) {
+  const [phase, setPhase] = useState("shake"); // shake | arrow | popin | done
+
+  useEffect(() => {
+    if (!anim) return;
+    setPhase("shake");
+    const t1 = setTimeout(() => setPhase("arrow"), 550);
+    const t2 = setTimeout(() => setPhase("popin"), 1450);
+    const t3 = setTimeout(() => { setPhase("done"); onDone(); }, 1850);
+    return () => { clearTimeout(t1); clearTimeout(t2); clearTimeout(t3); };
+  }, [anim]);
+
+  if (!anim || phase === "done") return null;
+
+  const fromMe = anim.fromPlayerId === 0;
+  // Arrow points down (toward your pile) when AI steals from you,
+  // or up (toward opponent) when you steal from AI.
+  const arrowDir = fromMe ? "↑ stealing →" : "↓ stolen ←";
+  const label = fromMe
+    ? `You steal ${anim.rank}s from ${anim.toName}!`
+    : `${anim.fromName} steals your ${anim.rank}s!`;
+
+  return (
+    <div style={{
+      position:"fixed", inset:0, zIndex:500,
+      pointerEvents:"none",
+      display:"flex", flexDirection:"column",
+      justifyContent:"center", alignItems:"center",
+    }}>
+      {/* Dark overlay pulse */}
+      <div style={{
+        position:"absolute", inset:0,
+        background: phase==="shake"
+          ? "rgba(231,76,60,0.08)"
+          : "rgba(0,0,0,0)",
+        transition:"background 0.4s",
+      }}/>
+
+      {/* Arrow + label banner */}
+      {(phase==="arrow"||phase==="popin") && (
+        <div className="steal-arrow" style={{
+          background:"rgba(231,76,60,0.92)",
+          border:"1.5px solid rgba(255,120,100,0.6)",
+          borderRadius:12,
+          padding:"10px 20px",
+          display:"flex", flexDirection:"column", alignItems:"center", gap:6,
+          boxShadow:"0 4px 24px rgba(231,76,60,0.5)",
+        }}>
+          <div style={{color:"#fff",fontSize:13,fontWeight:700,letterSpacing:0.5}}>
+            🎯 {label}
+          </div>
+          <div style={{display:"flex", gap:6, alignItems:"center"}}>
+            {anim.cards.map(c => (
+              <div key={c.id} className={phase==="popin"?"steal-popin":""} style={{
+                width:30, height:42, borderRadius:4, background:"#fff",
+                border:`2px solid ${SUIT_COLOR[c.suit]}`,
+                display:"flex", flexDirection:"column", justifyContent:"space-between",
+                padding:"2px 3px",
+              }}>
+                <div style={{color:SUIT_COLOR[c.suit],fontSize:9,fontWeight:700,lineHeight:1}}>{c.rank}</div>
+                <div style={{color:SUIT_COLOR[c.suit],fontSize:13,textAlign:"center",lineHeight:1}}>{c.suit}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Shake pulse rings on source — only during shake phase */}
+      {phase==="shake" && (
+        <div style={{
+          position:"absolute",
+          top: fromMe ? "auto" : "18%",
+          bottom: fromMe ? "22%" : "auto",
+          left:"50%", transform:"translateX(-50%)",
+          display:"flex", gap:4,
+        }}>
+          {anim.cards.map(c=>(
+            <div key={c.id} className="steal-shake" style={{
+              width:30, height:42, borderRadius:4, background:"#fff",
+              border:`2px solid #e74c3c`,
+              display:"flex", flexDirection:"column", justifyContent:"space-between",
+              padding:"2px 3px",
+            }}>
+              <div style={{color:SUIT_COLOR[c.suit],fontSize:9,fontWeight:700,lineHeight:1}}>{c.rank}</div>
+              <div style={{color:SUIT_COLOR[c.suit],fontSize:13,textAlign:"center",lineHeight:1}}>{c.suit}</div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // Opponent strip
 function OpponentStrip({player,isActive,stealGroups}) {
   const groups=groupByRank(player.capturePile);
@@ -312,6 +464,7 @@ export default function CardCapture() {
   const [captureOpts,setCaptureOpts]=useState(null);
   const [selectedSum,setSelectedSum]=useState(null);
   const [stealTargets,setStealTargets]=useState([]);
+  const [animatingSteal,setAnimatingSteal]=useState(null); // {fromPlayerId,fromName,toPlayerId,toName,rank,cards,pendingState}
   const [toast,setToast]=useState("");
   const toastRef=useRef();
   const aiLock=useRef(false);
@@ -330,14 +483,12 @@ export default function CardCapture() {
   // ── AI effect ──
   useEffect(()=>{
     if(!state||state.gameOver||screen!=="game") return;
+    if(animatingSteal) return; // wait for animation to finish
     const cur=state.players[state.currentPlayer];
     if(!cur.isAI) return;
-    // If current AI has no cards, find next player with cards
     if(cur.hand.length===0){
       const next=nextPlayerWithCards(state.players,state.currentPlayer);
-      if(next===-1){
-        setState(p=>({...p,gameOver:true}));setScreen("over"); return;
-      }
+      if(next===-1){setState(p=>({...p,gameOver:true}));setScreen("over");return;}
       setState(p=>({...p,currentPlayer:next,turnCount:(p.turnCount||0)+1,
         log:[...p.log,`${cur.name} has no cards, skipping`].slice(-30)}));
       return;
@@ -345,17 +496,34 @@ export default function CardCapture() {
     if(aiLock.current) return;
     aiLock.current=true;
     const t=setTimeout(()=>{
-      setState(prev=>{
-        if(!prev||prev.gameOver) return prev;
-        const next=aiTakeTurn(prev);
-        showToast(next.log[next.log.length-1]||"");
-        if(next.gameOver) setScreen("over");
-        return next;
-      });
-      aiLock.current=false;
+      // Peek at what the AI will do — if it's a steal, animate first
+      const peek=aiPeekSteal(state);
+      if(peek){
+        // Build the post-steal state but don't apply it yet
+        const pendingState=aiTakeTurn(state);
+        setAnimatingSteal({
+          fromPlayerId:state.currentPlayer,
+          fromName:state.players[state.currentPlayer].name,
+          toPlayerId:peek.victimId,
+          toName:state.players[peek.victimId].name,
+          rank:peek.rank,
+          cards:peek.cards,
+          pendingState,
+        });
+        aiLock.current=false;
+      } else {
+        setState(prev=>{
+          if(!prev||prev.gameOver) return prev;
+          const next=aiTakeTurn(prev);
+          showToast(next.log[next.log.length-1]||"");
+          if(next.gameOver) setScreen("over");
+          return next;
+        });
+        aiLock.current=false;
+      }
     },800);
     return()=>{clearTimeout(t);aiLock.current=false;};
-  },[state?.currentPlayer,state?.turnCount,state?.gameOver,screen]);
+  },[state?.currentPlayer,state?.turnCount,state?.gameOver,screen,animatingSteal]);
 
   // ── Human: select card ──
   const handleSelectCard=card=>{
@@ -379,10 +547,26 @@ export default function CardCapture() {
     const logs=[];
 
     if(forceSteal){
+      // Build the final state but hold it — animation commits it via onDone
       s.players[forceSteal.playerId].capturePile=
         s.players[forceSteal.playerId].capturePile.filter(c=>c.rank!==forceSteal.rank);
       player.capturePile.push(selectedCard,...forceSteal.cards);
       logs.push(`You stole ${forceSteal.rank}s from ${forceSteal.playerName}!`);
+      const need2=Math.max(0,5-player.hand.length);
+      player.hand.push(...s.drawPile.slice(0,need2));
+      s.drawPile=s.drawPile.slice(need2);
+      const gameOver2=isGameOver(s.players);
+      const next2=gameOver2?0:nextPlayerWithCards(s.players,0)===-1?0:nextPlayerWithCards(s.players,0);
+      const pendingState={...s,currentPlayer:next2,log:[...s.log,...logs].slice(-30),
+        gameOver:gameOver2,turnCount:(s.turnCount||0)+1};
+      clearSelection(); aiLock.current=false;
+      setAnimatingSteal({
+        fromPlayerId:0, fromName:"You",
+        toPlayerId:forceSteal.playerId, toName:forceSteal.playerName,
+        rank:forceSteal.rank, cards:forceSteal.cards,
+        pendingState, gameOver:gameOver2,
+      });
+      return; // don't fall through to setState below
     }else if(forceMarket){
       s.market=[...s.market,selectedCard];
       logs.push(`${selectedCard.rank}${selectedCard.suit} → market`);
@@ -452,6 +636,16 @@ export default function CardCapture() {
     showToast(msg);
     closeBankPanel();
     setState({...s,turnCount:(s.turnCount||0)+1,log:[...s.log,msg].slice(-30)});
+  };
+
+  // Called by StealAnimation when animation completes — commits the held state
+  const onStealAnimDone=()=>{
+    if(!animatingSteal) return;
+    const {pendingState,gameOver} = animatingSteal;
+    showToast(pendingState.log[pendingState.log.length-1]||"");
+    setAnimatingSteal(null);
+    setState(pendingState);
+    if(gameOver) setScreen("over");
   };
 
   // Human with no cards — auto-skip
@@ -539,6 +733,7 @@ export default function CardCapture() {
   return (
     <div style={S.bg}>
       <Toast msg={toast}/>
+      <StealAnimation anim={animatingSteal} onDone={onStealAnimDone}/>
 
       {/* Top bar */}
       <div style={S.topBar}>
